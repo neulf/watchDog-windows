@@ -18,7 +18,7 @@
 //日志文件名称
 #define LOG_FILE_PATH "log.log"
 //错误日志路径
-#define ERROR_LOG_PATH "C:\\watch_dog_error.log"
+#define ERROR_LOG_PATH "watch_dog_error.log"
 //错误日志文件对象
 FILE * ERROR_LOG;
 //日志文件对象

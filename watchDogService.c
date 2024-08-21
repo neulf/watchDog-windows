@@ -20,6 +20,8 @@ HANDLE								hToken;										//用户token
 HANDLE								hTokenDup;									//用户token
 LPVOID								pEnv;										//环境信息
 
+#define MAX_RETRIES 10          // 尝试获取令牌的最大次数
+#define RETRY_DELAY_MS 2000    // 每次尝试之间的延迟（毫秒）
 
 //看门狗函数主体
 void WINAPI ServiceMain(DWORD argc, PWSTR* argv) {
@@ -167,17 +169,74 @@ BOOL CreateProcessNoService(const wchar_t * commandLine) {
 	return  CreateProcess(NULL, commandLine, NULL, NULL, FALSE, CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi);
 }
 
+//获取user token，考虑远程桌面执行的情况
+BOOL GetUserTokenForRDP(HANDLE* phToken) {
+	WTS_SESSION_INFO* pSessionInfo = NULL;
+	DWORD dwCount = 0;
+
+	if (WTSEnumerateSessions(WTS_CURRENT_SERVER_HANDLE, 0, 1, &pSessionInfo, &dwCount)) {
+		for (DWORD i = 0; i < dwCount; ++i) {
+			if (pSessionInfo[i].State == WTSActive) { // 找到活动会话
+				DWORD dwSessionId = pSessionInfo[i].SessionId;
+				log_i(_T("找到活动会话ID: %u\n"), dwSessionId);
+
+				if (WTSQueryUserToken(dwSessionId, phToken)) {
+					log_i(_T("成功获取用户令牌。hToken: %p\n"), *phToken);
+					WTSFreeMemory(pSessionInfo);
+					return TRUE;
+				}
+				else {
+					DWORD dwError = GetLastError();
+					log_e(_T("WTSQueryUserToken 失败，错误码: %d\n"), dwError);
+				}
+			}
+		}
+		WTSFreeMemory(pSessionInfo);
+	}
+	else {
+		log_e(_T("WTSEnumerateSessions 失败\n"));
+	}
+
+	return FALSE;
+}
+
 //服务环境下创建进程
 BOOL CreateProcessForService(const wchar_t * commandLine) {
 
 	DWORD dwSessionID = WTSGetActiveConsoleSessionId();
 
-	//获取当前处于活动状态用户的Token
-	if (!WTSQueryUserToken(dwSessionID, &hToken)) {
-		int nCode = GetLastError();
-		log_e(_T("获取用户token失败,错误码:%d\n"), nCode);
-		CloseHandle(hToken);
+	if (dwSessionID == 0xFFFFFFFF) {
+		log_e(_T("当前没有活动的用户会话\n"));
 		return FALSE;
+	}
+	log_i(_T("当前活动会话ID: %u\n"), dwSessionID);
+
+
+	for (int i = 0; i < MAX_RETRIES; i++) {
+		//获取当前处于活动状态用户的Token
+		if (!WTSQueryUserToken(dwSessionID, &hToken)) {
+			int nCode = GetLastError();
+			log_e(_T("获取用户token失败,错误码:%d\n"), nCode);
+
+			if (i < (MAX_RETRIES - 1)) {
+				_tprintf(_T("等待 %d 毫秒后重试...\n"), RETRY_DELAY_MS);
+				Sleep(RETRY_DELAY_MS);  // 等待一段时间后重试
+
+				if (GetUserTokenForRDP(&hToken))
+				{
+					break;
+				}
+			}
+			else
+			{
+				CloseHandle(hToken);
+				return FALSE;
+			}
+		}
+		else
+		{
+			break;
+		}
 	}
 
 	//复制新的Token
